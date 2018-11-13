@@ -5,7 +5,7 @@ import time
 from collections import deque
 import json
 import os
-import learnvideocapture
+#import learnvideocapture
 
 stage = {}
 
@@ -76,6 +76,12 @@ class Sender():
         while True:
             if self.msg_state == "transfer_file":
                 continue
+            if self.msg_state == "kick_member":
+                continue
+            if self.msg_state == "kicked":
+                continue
+            if self.msg_state == "accept_member":
+                continue
             message = input()
             if message == "view":
                 print("CWND: "+str(self.cwnd))
@@ -85,8 +91,10 @@ class Sender():
                 print("Current ssthresh: " +str(self.ssthresh))
                 print("Current dupack: " +str(self.dupack))
                 continue
+            
             if message == "/openVideo":
-                learnvideocapture.captureVideo()
+                
+#                learnvideocapture.captureVideo()
                 
                 continue
             
@@ -163,24 +171,26 @@ class Sender():
                 #duplicate packet(already received) being sent, ignore the packet
                 else:
                     status = "duplicate"  
-                #send acknowledgement to these packets
+                #send acknowledgement to these packets (self.ack is the next sequence number for the server)
                 self.send_ack(self.ack)
                 
-            #if ack received
+            #if ack received, acknowledgement sent from the server
             elif ack_flag == 1:
                 print("Received ack no: %s"%str(recv_ack_no))
                 #ack is received to acknowledge new data,restart the retransmission timer
                 
-                if  recv_ack_no > self.seq_no:
-                    self.seq_no = recv_ack_no
+                if  recv_ack_no-1 > self.seq_no:
+                    self.seq_no = recv_ack_no-1
                     self.retransmission_timer = time.time()
                     #in slow start, for every ack received, cwnd + 1 MSS
+                    
                     if self.state == "slow_start":
                         self.cwnd += self.MSS
                     
                     #in congestion avoidance, for every ack received, cwnd = cwnd + 1/cwnd
                     elif self.state == "congestion_avoidance":
                         self.cwnd += self.MSS / self.cwnd
+                        
                     #in fast recovery, the state enter congestion avoidance mode
                     elif self.state == "fast_recovery":
                         self.state = "congestion_avoidance"
@@ -229,6 +239,52 @@ class Sender():
                 for element in data:
                     print(element)
                     
+            elif "/viewRequests" in message:
+                new_message = message.replace(message[:13],"")
+                data = json.loads(new_message)["joinRequests"]
+                if len(data)==0:
+                    print("No join requests")
+                else:
+                    if "admin" in data:
+                        print(data)
+                    else:
+                        print("Join requests:")
+                        for element in data:    
+                            print(element)
+                    
+            elif "/whoIsAdmin" in message:
+                new_message = message.replace(message[:11],"")
+                print(new_message)
+                
+            elif "/kickMember" in message:
+                self.msg_state = "kick_member"
+                new_message = message.replace(message[:11],"")
+                if "admin" in new_message:
+                    print(new_message)
+                else:
+                    print("Press enter and then key in the member to be kicked")
+                    username = input("Please enter the username")
+                    packet = self.construct_packet(username,0,0)
+                    self.socket.sendall(packet)
+                self.msg_state = "normal"
+                
+            elif message == "/kicked":
+                print("You are kicked from the group! Press any key to quit")
+                self.msg_state = "kicked"
+                break
+                              
+            elif message == "/acceptMember":
+                self.msg_state = "accept_member"
+                new_message = message.replace(message[:13],"")
+                if "admin" in new_message:
+                    print(new_message[13:])
+                else:
+                    print("Press enter and then key in the member to be accepted")
+                    username = input("Please enter the username")
+                    packet = self.construct_packet(username,0,0)
+                    self.socket.sendall(packet)
+                self.msg_state = "normal"
+                
             elif "/transferFile" in message:
                 self.msg_state = "transfer_file"
                 print("Press enter and then key in your filename")
@@ -260,6 +316,8 @@ class Sender():
                     f.write(data)
                 f.close()
                 print("File ", filename, " received")
+#            elif message == "/logOut":
+                
             else:
                 print(message)
     
@@ -282,6 +340,24 @@ class Sender():
     def start(self):
         threading.Thread(target=self.send).start()
         threading.Thread(target=self.receive).start()
+        
+def waitForAcceptance(serverSocket):
+    while not stage['accept']:
+        message = serverSocket.recv(1024).decode("utf-8")[14:]
+        print(message)
+        if "/accepted" in message:
+            new_message = message[9:]
+            print("Welcome to %s"%new_message)
+            print("Chatroom Commands:\n/viewMembers -> See all chatroom members\n/onlineMembers -> See all online chatroom members\n/viewRequests -> See all the pending requests (Only admin) \n/acceptMember -> Accept a new request (Only admin) \n/kickMember -> Kick a member out of the group (Only admin) \n /whoIsAdmin -> Check who is the admin of this chat \n/transferFile -> Transfer files to other members\n/openVideo -> Open the webcam for recording\n/congestionControl -> to view how cwnd changes when packet loss.\nJust type whenever you want to send any messages!")         
+            client = Sender(serverSocket)
+            client.start()
+            stage['accept'] = True
+        elif "/rejected" in message:
+            print("Sorry, you are being rejected! Press any key to quit!")
+            break
+            
+        
+    
 
 
 portnumber = 65432
@@ -292,6 +368,7 @@ message = serverSocket.recv(1024).decode("utf-8")
 print(message[14:])
 username = input("Please enter your username:")
 serverSocket.sendall(bytes(username,"utf8"))
+
 response = serverSocket.recv(1024).decode("utf-8")
 print(response[14:])  
 chatroom = input("Please enter the chatroom name:")
@@ -301,9 +378,23 @@ response = serverSocket.recv(1024).decode("utf-8")
 print("Please wait...")
 time.sleep(2)
 print(response)
-if "does not" in response:
-    serverSocket.close()
-else:
-    print("Chatroom Commands:\n/viewMembers -> See all chatroom members\n/onlineMembers -> See all online chatroom members\n/transferFile -> Transfer files to other members\n/openVideo -> Open the webcam for recording\n/congestionControl -> to view how cwnd changes when packet loss.\nJust type whenever you want to send any messages!")              
+
+if "created" in response:
+    print(response)
+    stage['accept'] = True
+    print("Chatroom Commands:\n/viewMembers -> See all chatroom members\n/onlineMembers -> See all online chatroom members\n/viewRequests -> See all the pending requests (Only admin) \n/acceptMember -> Accept a new request (Only admin) \n/kickMember -> Kick a member out of the group (Only admin) \n /whoIsAdmin -> Check who is the admin of this chat \n/transferFile -> Transfer files to other members\n/openVideo -> Open the webcam for recording\n/congestionControl -> to view how cwnd changes when packet loss.\nJust type whenever you want to send any messages!")      
     client = Sender(serverSocket)
     client.start()
+    
+else:
+    stage['accept'] = False
+    print("Please wait for admin acceptance.")
+    listenAcceptance = threading.Thread(target=waitForAcceptance,args=(serverSocket,))
+    listenAcceptance.start()
+
+#if "does not" in response:
+#    serverSocket.close()
+#else:
+#    print("Chatroom Commands:\n/viewMembers -> See all chatroom members\n/onlineMembers -> See all online chatroom members\n/transferFile -> Transfer files to other members\n/openVideo -> Open the webcam for recording\n/congestionControl -> to view how cwnd changes when packet loss.\nJust type whenever you want to send any messages!")              
+#    client = Sender(serverSocket)
+#    client.start()

@@ -57,10 +57,10 @@ class ClientThread():
     
     #Broadcast the message to all other users except the sender
     def broadcast(self,message):
-        for user in chatroom[self.chatroom]["onlineMembers"]:
+        for user in chatroom[self.chatroom].onlineMembers:
             if user != self.username:
                 packet = self.construct_broadcast_packet(0,0,message)
-                chatroom[self.chatroom]["clients"][user].sendall(packet)
+                chatroom[self.chatroom].clients[user].sendall(packet)
                 
     #dissect the packet received to get the seq no and ack no and message
     def dissect_packet(self,packet):
@@ -105,17 +105,35 @@ class ClientThread():
                     
                 #handle system commands
                 if message == "/onlineMembers":
-                    new_message = "/onlineMembers"+json.dumps({"onlineMembers":chatroom[self.chatroom]["onlineMembers"]})
+                    new_message = "/onlineMembers"+json.dumps({"onlineMembers":chatroom[self.chatroom].onlineMembers})
                     packet = self.construct_packet_without_username(0,0,new_message)
                     self.client.sendall(packet)
                     self.next_seq_no += self.MSS
                 
                 elif message == "/viewMembers":
-                    new_message = "/allMembers"+json.dumps({"allMembers":chatroom[self.chatroom]["allMembers"]})
+                    new_message = "/allMembers"+json.dumps({"allMembers":chatroom[self.chatroom].allMembers})
                     packet = self.construct_packet_without_username(0,0,new_message)
                     self.client.sendall(packet)
                     self.next_seq_no += self.MSS
                 
+                elif message == "/viewRequests":
+                    if self.isAdmin():
+                        new_message = "/viewRequests"+json.dumps({"joinRequests":chatroom[self.chatroom].joinRequests})
+                        packet = self.construct_packet_without_username(0,0,new_message)
+                        self.client.sendall(packet)
+                        self.next_seq_no +=self.MSS
+                    else:
+                        new_message = "/viewRequests"+json.dumps({"joinRequests":"You're not an admin!"})
+                        packet = self.construct_packet_without_username(0,0,new_message)
+                        self.client.sendall(packet)
+                        self.next_seq_no += self.MSS
+                    
+                elif message == "/whoIsAdmin":
+                    new_message = "/whoIsAdmin"+chatroom[self.chatroom].admin
+                    packet = self.construct_packet_without_username(0,0,new_message)
+                    self.client.sendall(packet)
+                    self.next_seq_no += self.MSS
+                    
                 elif message == "/transferFile":
                     print("Prepare for file transfer")
                     packet = self.construct_packet_without_username(0,0,"/transferFile filename")
@@ -138,10 +156,10 @@ class ClientThread():
                     f.close()
                     print("File:",filename,"from:",self.username,"has been received in chatroom:",self.chatroom)
                     
-                    for user in chatroom[self.chatroom]["onlineMembers"]:
+                    for user in chatroom[self.chatroom].onlineMembers:
                         if user != self.username:
                             packet = self.construct_packet_without_username(0,0,"/receivingfile")
-                            userClient = chatroom[self.chatroom]["clients"][user]
+                            userClient = chatroom[self.chatroom].clients[user]
                             userClient.sendall(packet)
                             userClient.sendall(bytes(filename,"utf-8"))
                             with open("temp "+ filename,'rb') as f:
@@ -150,6 +168,54 @@ class ClientThread():
                                 image_byte = dataLen.to_bytes(4,"big")
                                 userClient.sendall(image_byte)
                                 userClient.sendall(data)
+                                
+                elif message == "/kickMember":
+                    if (self.isAdmin()):
+                        packet = self.construct_packet_without_username(0,0,"/kickMember")
+                        self.client.sendall(packet)
+                        #receive ack
+                        self.client.recv(1024)
+                        self.client.recv(1024)
+                        member = self.client.recv(1024).decode("utf-8")[14:]
+                        if member in chatroom[self.chatroom].allMembers:
+                            chatroom[self.chatroom].remove(member)
+                            if member in chatroom[self.chatroom].onlineMembers:
+                                chatroom[self.chatroom].remove_online_members(member)
+                                #inform the member that he/she is being kicked
+                                packet = self.construct_packet_without_username(0,0,"/kicked")
+                                chatroom[self.chatroom].clients[member].sendall(packet)
+                                del chatroom[self.chatroom].clients[member]
+                        else:
+                            packet = self.construct_packet_without_username(0,0,"/kickMemberMember does not exist!")
+                            self.client.sendall(packet)
+                            
+                        print(chatroom)
+                        
+
+                    else:
+                        packet = self.construct_packet_without_username(0,0,"/kickMemberYou're not an admin!")
+                        self.client.sendall(packet)
+                        
+                elif message == "/acceptMember":
+                    if (self.isAdmin()):
+                        packet = self.construct_packet_without_username(0,0,"/acceptMember")
+                        self.client.sendall(packet)
+                        self.client.recv(1024)
+                        self.client.recv(1024)
+                        member = self.client.recv(1024).decode("utf-8")[14:]
+                        print(member)
+                        if member in chatroom[self.chatroom].joinRequests:
+                            packet = self.construct_packet_without_username(0,0,"/accepted")
+                            chatroom[self.chatroom].waitClients[member].sendall(packet)
+                        chatroom[self.chatroom].remove_join_request(member)
+                        chatroom[self.chatroom].add_new_client(member,chatroom[self.chatroom].waitClients[member])
+                        chatroom[self.chatroom].remove_wait_client(member)
+                    else:
+                        packet = self.construct_packet_without_username(0,0,"/acceptMemberYou are not an admin")
+                        self.client.sendall(packet)
+                        
+                        
+
                 else:
                     print("Received from %s"%self.username+":"+message)
                     self.broadcast(message)
@@ -158,7 +224,7 @@ class ClientThread():
             
     #check if the client is admin
     def isAdmin(self):
-        if self.username == chatroom[self.chatroom]["admin"]:
+        if self.username == chatroom[self.chatroom].admin:
             return True
         else:
             return False
@@ -174,6 +240,7 @@ ack_no = 1
 
 class ChatServer:
     def __init__(self):
+        self.chatroom_list = []
         self.chatroom = "SUTD"
         self.admin = None
         self.joinRequests = []
@@ -218,31 +285,52 @@ class ChatServer:
             print("Received: %s from %s:%s"%(username,client_address[0],client_address[1]))
             packet = self.construct_packet_without_username(0,0,"What is the name of the chatroom?")
             client.sendall(packet)
-#            self.send_without_username(client,"What is the name of the chatroom")
+
             chatroom_name = client.recv(1024).decode("utf-8")
             print("Received: %s from %s:%s"%(chatroom_name,client_address[0],client_address[1]))
-            
-            if chatroom_name == self.chatroom:
-                client.sendall(bytes("%s has joined the chatroom!"%username,"utf8"))
-                self.add_new_client(username,client)
-                if self.admin is None:
-                    self.admin = username
-                #update the global variable
-                chatroom[self.chatroom] = {}
-                chatroom[self.chatroom]["admin"] = self.admin
-                chatroom[self.chatroom]["joinRequests"] = self.joinRequests
-                chatroom[self.chatroom]["onlineMembers"] = self.onlineMembers
-                chatroom[self.chatroom]["allMembers"] = self.allMembers
-                chatroom[self.chatroom]["offlineMessages"] = self.offlineMessages
-                chatroom[self.chatroom]["waitClients"] = self.waitClients
-                chatroom[self.chatroom]["clients"]=self.clients
-                
-                time.sleep(2)
-                clientThread = ClientThread(username,client,self.chatroom)
+            if chatroom_name not in self.chatroom_list:
+                new_chatroom = ChatRoom(chatroom_name,username,client)
+                chatroom[chatroom_name] = new_chatroom
+                self.chatroom_list.append(chatroom_name)
+                client.sendall(bytes("New chatroom %s is created!"%chatroom_name,"utf8"))
+                clientThread = ClientThread(username,client,chatroom_name)
                 clientThread.start()
                 
             else:
-                client.sendall(bytes("Chatroom does not exist!","utf8"))
+                exist_chatroom = chatroom[chatroom_name]
+                exist_chatroom.add_join_request(username)
+                exist_chatroom.add_wait_client(username,client)
+                for user in exist_chatroom.onlineMembers:
+                    packet = self.construct_packet_without_username(0,0,"%s has requested to join the chat!"%username)
+                    exist_chatroom.clients[user].sendall(packet)
+                client.sendall(bytes("Please wait for admin's approval","utf8"))
+                clientThread = ClientThread(username,client,chatroom_name)
+                clientThread.start()
+                
+                    
+#                
+#
+#            if chatroom_name == self.chatroom:
+#                client.sendall(bytes("%s has joined the chatroom!"%username,"utf8"))
+#                self.add_new_client(username,client)
+#                if self.admin is None:
+#                    self.admin = username
+#                #update the global variable
+#                chatroom[self.chatroom] = {}
+#                chatroom[self.chatroom]["admin"] = self.admin
+#                chatroom[self.chatroom]["joinRequests"] = self.joinRequests
+#                chatroom[self.chatroom]["onlineMembers"] = self.onlineMembers
+#                chatroom[self.chatroom]["allMembers"] = self.allMembers
+#                chatroom[self.chatroom]["offlineMessages"] = self.offlineMessages
+#                chatroom[self.chatroom]["waitClients"] = self.waitClients
+#                chatroom[self.chatroom]["clients"]=self.clients
+#
+#                time.sleep(2)
+#                clientThread = ClientThread(username,client,self.chatroom)
+#                clientThread.start()
+                
+#            else:
+#                client.sendall(bytes("Chatroom does not exist!","utf8"))
                 
 
     #add the new client connection to the server
@@ -263,6 +351,54 @@ class ChatServer:
     def start(self):
         self.handle_connection()
          
+class ChatRoom:
+    def __init__(self,chatroom,admin,client):
+        self.chatroom = chatroom
+        self.admin = admin
+        self.joinRequests = []
+        self.onlineMembers =[admin]
+        self.allMembers = [admin]
+        self.offlineMessages = {}
+        self.waitClients = {}
+        self.clients = {}
+        self.clients[admin] = client
+        
+    def add_new_client(self,username,client):
+        self.clients[username] = client
+        if username not in self.allMembers:
+            self.allMembers.append(username)
+        self.onlineMembers.append(username)
+    
+    def logout(self,username):
+        self.onlineMembers.remove(username)
+        
+    def add_join_request(self,username):
+        self.joinRequests.append(username)
+    
+    def remove_join_request(self,username):
+        self.joinRequests.remove(username)
+        
+    def remove_online_members(self,username):
+        self.onlineMembers.remove(username)
+    
+    def kick_members(self,username):
+        self.remove_online_members(username)
+        self.addMembers.remove(username)
+        
+    def add_wait_client(self,username,client):
+        self.waitClients[username] = client
+    
+    def remove_wait_client(self,username):
+        del self.waitClients[username]
+        
+    def remove_member(self,username):
+        self.allMembers.remove(username)
+    
+        
+    
+        
+        
+        
             
 chatRoom = ChatServer().start()
 
